@@ -1,0 +1,156 @@
+class CalculateTSNE:
+    """
+    This class shows the t-SNE algorithm step by step.
+    """
+    def __init__(self, data):
+        self.data = data
+
+    def pairwise_distances(self, X: np.ndarray) -> np.ndarray:
+        """
+        This method calculates the Euclidean distance between the data points in the matrix.
+        :param np.ndarray X: the matrix
+        :return np.ndarray: the matrix containing the distances between the elements
+        """
+        return np.sum((X[None, :] - X[:, None]) ** 2, 2)
+
+    def p_matrix(self, distances: np.ndarray, sigmas: np.ndarray) -> np.ndarray:
+        """
+        # This function returns the Gaussian kernel of the datamatrix.
+        :param np.ndarray distances: the Euclidean distance between the data points
+        :param np.ndarray sigmas: the sigma values for the Gaussian distribution's standard deviation
+        :return np.ndarray: the matrix
+        """
+        result = np.exp(-distances / (2 * np.square(sigmas)))
+        np.fill_diagonal(result, 0.)
+        result += 1e-8
+        return result / result.sum(axis=1)
+
+    def CalcEntropy(self, pmtx: np.ndarray) -> np.ndarray:
+        """
+        This method returns the corresponding Shannon entropy to the given distribution
+        defined by the p_matrix function.
+        :param np.ndarray pmtx: the P matrix
+        :return np.ndarray: the entropy
+        """
+        ent = -np.sum(pmtx * np.log2(pmtx), 1)
+        return 2 ** ent
+
+    def BinSearch_sigmas(self, func, perplexity: int, tolerance: float = 1e-10,
+                         max_iters: int = 1000, lowb: float = 1e-20, uppb: int = 10000) -> float:
+        """
+        We perform a classic Binary search to find the correct sigma values.
+        We know that this method converges, to increase precision it is advised to set max_iters higher or decrease tolerance.
+        It is going to cost us more runtime tough'.
+        Sets an initial guess and updates the guess.
+        If the entopy of the corresponding gaussian
+        is higher we set our upper bound to this value etc.
+        If our guess is below our preferred tolerance the algo stops.
+        :param function func: it updates our guess
+        :param int perplexity: the perplexity
+        :param float tolerance: if our guess is below our preferred tolerance the algorithm stops
+        :param int max_iters: the maximum number of the iterations
+        :param float lowb: a lower boundary of the guess
+        :param int uppb: an upper boundary of the guess
+        :return float: the sigma value
+        """
+        for _ in range(max_iters):
+            guess = (uppb + lowb) / 2.
+            val = func(guess)
+
+            if val > perplexity:
+                uppb = guess
+            else:
+                lowb = guess
+
+            if np.abs(val - perplexity) <= tolerance:
+                return guess
+
+        warnings.warn(f"\nSearch couldn't find goal, returning {guess} with value {val}")
+        return guess
+
+    def find_sigmas(self, dists: np.ndarray, perplexity: int) -> np.ndarray:
+        """
+        Calculates the corresponding sigma values of the data points.
+        :param np.ndarray dists: the Euclidean distance between the data points
+        :param int perplexity: the given perplexity value
+        :return np.ndarray: the sigma value for every data point (n*1)
+        """
+        found_sigmas = np.zeros(dists.shape[0])
+        for i in range(dists.shape[0]):
+            func = lambda sig: self.CalcEntropy(self.p_matrix(dists[i:i + 1, :], np.array([sig])))
+            found_sigmas[i] = self.BinSearch_sigmas(func, perplexity)
+        return found_sigmas
+
+    def q_joint(self, y: np.ndarray) -> np.ndarray:
+        """
+        Calculates the Q similarity matrix with Student t distribution.
+        :param np.ndarray y: the reduced dimensional data
+        :return np.ndarray: the Q matrix
+        """
+        dists = self.pairwise_distances(y)
+        nom = 1 / (1 + dists)
+        np.fill_diagonal(nom, 0.)
+        return nom / np.sum(np.sum(nom))
+
+    def p_joint(self, X: np.ndarray, perp: int) -> np.ndarray:
+        """
+        Calculates the final P similarity matrix based on the crowding problem.
+        :param np.ndarray X: the former P matrix
+        :param int perp: the perlexity
+        :return np.ndarray : the final P similarity matrix
+        """
+        n = X.shape[0]
+        dists = self.pairwise_distances(X)
+        sigmas = self.find_sigmas(dists, perp)
+        p_cond = self.p_matrix(dists, sigmas)
+        return (p_cond + p_cond.T) / (2. * n)
+
+    def gradient(self, P: np.ndarray, Q: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """
+        Calculates the gradient vectors based on the Kullback-Leibler divergence.
+        :param np.ndarray P: the P matrix
+        :param np.ndarray Q: the Q matrix
+        :param np.ndarray y: the reduced dimensional data
+        :return np.ndarray: the gradient vectors
+        """
+        (n, no_dims) = y.shape
+        pq_diff = P - Q
+        y_diff = np.expand_dims(y, 1) - np.expand_dims(y, 0)
+
+        dists = self.pairwise_distances(y)
+        aux = 1 / (1 + dists)
+        return 4 * (np.expand_dims(pq_diff, 2) * y_diff * np.expand_dims(aux, 2)).sum(1)
+
+    def m(self, t: int) -> float:
+        """
+        The momentum in the data.
+        :param int t: the number of the iteration
+        :return float:
+        """
+        return 0.5 if t < 250 else 0.8
+
+    def tsne(self, ydim: int, T: int = 1000, l: int = 500, perp: int = 30) -> np.ndarray:
+        """
+        Calculates the t-SNE algorithm foe the data and reduces the dimension of the data points.
+        :param int ydim: the target dimension
+        :param int T: the number of the iteration
+        :param int l: the learning rate
+        :param int perp: the perplexity
+        :return np.ndarray: the reduced data points
+        """
+        n, dim = self.data.shape
+        P = self.p_joint(self.data, perp)
+
+        Y = []
+        y = np.random.normal(loc=0.0, scale=1e-4, size=(n, ydim))
+        Y.append(y)
+        Y.append(y)
+
+        for t in range(T):
+            Q = self.q_joint(Y[-1])
+            grad = self.gradient(P, Q, Y[-1])
+            y = Y[-1] - l * grad + self.m(t) * (Y[-1] - Y[-2])
+            Y.append(y)
+            if t % 10 == 0:
+                Q = np.maximum(Q, 1e-12)
+        return y
